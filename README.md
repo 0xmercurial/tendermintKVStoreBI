@@ -29,8 +29,10 @@ export GO111MODULE=on
 
 4. Build the binary (no optimizations/flags): 
 ``` 
+go mod tidy -compat=1.17
 go build
 ```
+NOTE: This version uses Go 1.17.
 
 5. Run the binary. This will start the app in the same process as Tendermint Core: 
 ```
