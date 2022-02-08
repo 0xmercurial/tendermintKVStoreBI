@@ -11,7 +11,7 @@ brew install tendermint
 Set-up:
 1. First, clone and navigate to the project :
 ```
- git clone <this-repo>
+ git clone https://github.com/zkmiyavi/tendermintKVStoreBI.git
  cd tendermintKVStoreBI
 ```
 
