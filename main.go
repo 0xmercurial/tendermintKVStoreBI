@@ -1,118 +1,90 @@
 package main
 
 import (
-	"bytes"
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 
 	"github.com/dgraph-io/badger"
-	abcitypes "github.com/tendermint/tendermint/abci/types"
+	"github.com/spf13/viper"
+
+	abciclient "github.com/tendermint/tendermint/abci/client"
+	abci "github.com/tendermint/tendermint/abci/types"
+	cfg "github.com/tendermint/tendermint/config"
+	"github.com/tendermint/tendermint/libs/log"
+	"github.com/tendermint/tendermint/libs/service"
+	nm "github.com/tendermint/tendermint/node"
 )
 
-type KVStoreApplication struct {
-	db           *badger.DB
-	currentBatch *badger.Txn
+var configFile string
+
+func init() {
+	flag.StringVar(&configFile, "config", "$HOME/.tendermint/config/config.toml", "Path to config.toml")
 }
 
-//compile time check that KVStoreApplication satifies abcitypes.Application interface
-var _ abcitypes.Application = (*KVStoreApplication)(nil)
-
-func NewKVStoreApplication(db *badger.DB) *KVStoreApplication {
-	return &KVStoreApplication{
-		db: db,
-	}
-}
-
-func (KVStoreApplication) Info(req abcitypes.RequestInfo) abcitypes.ResponseInfo {
-	return abcitypes.ResponseInfo{}
-}
-
-func (app *KVStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeliverTx {
-	code := app.isValid(req.Tx)
-	if code != 0 {
-		return abcitypes.ResponseDeliverTx{Code: code}
-	}
-
-	parts := bytes.Split(req.Tx, []byte("="))
-	key, value := parts[0], parts[1]
-
-	err := app.currentBatch.Set(key, value)
+func main() {
+	db, err := badger.Open(badger.DefaultOptions("/tmp/badger"))
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "failed to open badger db: %v", err)
+		os.Exit(1)
 	}
+	defer db.Close()
+	app := NewKVStoreApplication(db)
 
-	return abcitypes.ResponseDeliverTx{Code: 0}
-}
+	flag.Parse()
 
-func (app *KVStoreApplication) isValid(tx []byte) (code uint32) {
-	// check format
-	parts := bytes.Split(tx, []byte("="))
-	if len(parts) != 2 {
-		return 1
-	}
-
-	key, value := parts[0], parts[1]
-
-	// check if the same key=value already exists
-	err := app.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err != nil && err != badger.ErrKeyNotFound {
-			return err
-		}
-		if err == nil {
-			return item.Value(func(val []byte) error {
-				if bytes.Equal(val, value) {
-					code = 2
-				}
-				return nil
-			})
-		}
-		return nil
-	})
+	node, err := newTendermint(app, configFile)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "%v", err)
+		os.Exit(2)
 	}
 
-	return code
+	node.Start(context.Background())
+	defer func() {
+		// node.String()
+		node.Wait()
+	}()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
 }
 
-func (app *KVStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx {
-	code := app.isValid(req.Tx)
-	return abcitypes.ResponseCheckTx{Code: code, GasWanted: 1}
-}
+func newTendermint(app abci.Application, configFile string) (service.Service, error) {
+	// read config
+	config := cfg.DefaultValidatorConfig()
+	config.SetRoot(filepath.Dir(filepath.Dir(configFile)))
+	viper.SetConfigFile(configFile)
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("viper failed to read config file: %w", err)
+	}
+	if err := viper.Unmarshal(config); err != nil {
+		return nil, fmt.Errorf("viper failed to unmarshal config: %w", err)
+	}
+	if err := config.ValidateBasic(); err != nil {
+		return nil, fmt.Errorf("config is invalid: %w", err)
+	}
 
-func (KVStoreApplication) Commit() abcitypes.ResponseCommit {
-	return abcitypes.ResponseCommit{}
-}
+	// create logger
+	logger, err := log.NewDefaultLogger(log.LogFormatJSON, log.LogLevelError, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse log level: %w", err)
+	}
 
-func (KVStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.ResponseQuery {
-	return abcitypes.ResponseQuery{Code: 0}
-}
+	// create node
+	node, err := nm.New(
+		context.Background(),
+		config,
+		logger,
+		abciclient.NewLocalCreator(app),
+		nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new Tendermint node: %w", err)
+	}
 
-func (KVStoreApplication) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
-	return abcitypes.ResponseInitChain{}
-}
-
-// BeginBlock creates a batch to store block's transactions
-func (app *KVStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
-	app.currentBatch = app.db.NewTransaction(true)
-	return abcitypes.ResponseBeginBlock{}
-}
-
-func (KVStoreApplication) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
-	return abcitypes.ResponseEndBlock{}
-}
-
-func (KVStoreApplication) ListSnapshots(abcitypes.RequestListSnapshots) abcitypes.ResponseListSnapshots {
-	return abcitypes.ResponseListSnapshots{}
-}
-
-func (KVStoreApplication) OfferSnapshot(abcitypes.RequestOfferSnapshot) abcitypes.ResponseOfferSnapshot {
-	return abcitypes.ResponseOfferSnapshot{}
-}
-
-func (KVStoreApplication) LoadSnapshotChunk(abcitypes.RequestLoadSnapshotChunk) abcitypes.ResponseLoadSnapshotChunk {
-	return abcitypes.ResponseLoadSnapshotChunk{}
-}
-
-func (KVStoreApplication) ApplySnapshotChunk(abcitypes.RequestApplySnapshotChunk) abcitypes.ResponseApplySnapshotChunk {
-	return abcitypes.ResponseApplySnapshotChunk{}
+	return node, nil
 }
