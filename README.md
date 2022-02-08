@@ -36,4 +36,4 @@ go build
 ```
 ./tendermintKVStoreBI -config "./tmp/example/config/config.toml"
 ```
-
+6. Revisit the source tutorial for messages to pass to the app: https://docs.tendermint.com/master/tutorials/go-built-in.html
